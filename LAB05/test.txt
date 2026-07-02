@@ -1,0 +1,250 @@
+#!/bin/bash
+
+# Default port number
+PORT=8080
+
+# Parse arguments for port number (optional)
+while getopts "p:" opt; do
+    case $opt in
+        p) PORT=$OPTARG ;;
+        *) echo "Usage: $0 [-p port] [1|2|3|4|5|6|7|8|9]"; exit 1 ;;
+    esac
+done
+
+# Shift so that $1 now points to the test set selection
+shift $((OPTIND-1))
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 [-p port] [1|2|3|4|5|6|7|8|9]"
+    exit 1
+fi
+
+TEST_SET=$1
+
+# Select the REQUESTS, RESPONSES, and INTERVALS based on the test set number
+case $TEST_SET in
+    1)
+        REQUESTS=(
+            "CREATE hello 1"
+            "CREATE hello 2"
+            "CREATE hello 3"
+            "CREATE hello 4"
+        )
+        RESPONSES=(
+            "CREATE OK"
+            "COLLISION"
+            "COLLISION"
+            "COLLISION"
+        )
+        INTERVALS=(5 5 5 5)
+        ;;
+    2)
+        REQUESTS=(
+            "CREATE hello world"
+            "READ hello"
+            "READ hello"
+            "READ hello"
+        )
+        RESPONSES=(
+            "CREATE OK"
+            "world"
+            "world"
+            "world"
+        )
+        INTERVALS=(5 5 0 0)
+        ;;
+    3)
+        REQUESTS=(
+            "CREATE hello world"
+            "READ hello"
+            "CREATE bye snu"
+            "READ bye"
+        )
+        RESPONSES=(
+            "CREATE OK"
+            "world"
+            "CREATE OK"
+            "snu"
+        )
+        INTERVALS=(5 5 -5 5)
+        ;;
+    4)
+        REQUESTS=(
+            "CREATE hello world"
+            "DELETE bye"
+            "READ hello"
+            "UPDATE hello snu"
+            "DELETE hello"
+            "READ hello"
+        )
+        RESPONSES=(
+            "CREATE OK"
+            "NOT FOUND"
+            "world"
+            "UPDATE OK"
+            "DELETE OK"
+            "world"
+        )
+        INTERVALS=(5 0 5 5 5 -10)
+        ;;
+    5)
+        REQUESTS=(
+            "CREATE hello world"
+            "DELETE hello"
+            "READ hello"
+            "READ hello"
+            "UPDATE hello snu"
+        )
+        RESPONSES=(
+            "CREATE OK"
+            "DELETE OK"
+            "world"
+            "world"
+            "NOT FOUND"
+        )
+        INTERVALS=(0 0 0 0 0)
+        ;;
+    6)
+        REQUESTS=(
+            "READ hello"
+            "READ hello"
+            "CREATE hello world"
+            "READ hello"
+            "READ hello"
+        )
+        RESPONSES=(
+            "NOT FOUND"
+            "NOT FOUND"
+            "CREATE OK"
+            "NOT FOUND"
+            "NOT FOUND"
+        )
+        INTERVALS=(0 0 0 0 0)
+        ;;
+    7)  # additional 3
+        REQUESTS=(
+            "CREATE key1 val1"
+            "CREATE key2 val2"
+            "READ key1"
+            "READ key2"
+            "DELETE key1"
+            "READ key1"
+            "UPDATE key2 new2"
+            "READ key2"
+        )
+        RESPONSES=(
+            "CREATE OK"
+            "CREATE OK"
+            "val1"
+            "val2"
+            "DELETE OK"
+            "val1"
+            "UPDATE OK"
+            "val2"
+        )
+        INTERVALS=(0 0 0 0 0 0 0 0)
+        ;;
+    8)  # additional 4
+        REQUESTS=(
+            "CREATE foo bar"
+            "READ foo"
+            "UPDATE foo baz"
+            "READ foo"
+            "DELETE foo"
+            "CREATE foo qux"
+            "READ foo"
+            "DELETE foo"
+        )
+        RESPONSES=(
+            "CREATE OK"
+            "bar"
+            "UPDATE OK"
+            "bar"
+            "DELETE OK"
+            "CREATE OK"
+            "bar"
+            "DELETE OK"
+        )
+        INTERVALS=(0 0 0 0 0 0 0 0)
+        ;;
+    9)  # additional 5
+        REQUESTS=(
+            "READ missing"
+            "DELETE missing"
+            "UPDATE missing new"
+            "CREATE a 1"
+            "UPDATE a 2"
+            "READ a"
+            "DELETE a"
+            "READ a"
+        )
+        RESPONSES=(
+            "NOT FOUND"
+            "NOT FOUND"
+            "NOT FOUND"
+            "CREATE OK"
+            "UPDATE OK"
+            "1"
+            "DELETE OK"
+            "1"
+        )
+        INTERVALS=(0 0 0 0 0 0 0 0)
+        ;;
+    *)
+        echo "Invalid test set number. Use 1–9."
+        exit 1
+        ;;
+esac
+
+OUTPUT_DIR="./output"
+rm -rf "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR"
+
+echo "=== Starting Requests and Responses (Test Set $TEST_SET) ==="
+
+RESPONSE_TIMES=()
+
+# Run each request in the background
+for i in "${!REQUESTS[@]}"; do
+    echo "Sending Request $i: '${REQUESTS[$i]}'"
+    {
+        echo "${REQUESTS[$i]}" | ./client -p $PORT | ts '[%Y-%m-%d %H:%M:%S]' > "$OUTPUT_DIR/response_$i.log"
+        date +%s >> "$OUTPUT_DIR/response_$i.log"
+    } &
+    sleep 0.1
+done
+
+wait
+
+echo "=== Verifying Responses ==="
+check_required_string() {
+    local file=$1 string=$2
+    if ! grep -q "$string" "$file"; then
+        echo -e "\033[31mError: Expected '$string' not found in $file\033[0m"
+        return 1
+    fi
+}
+for i in "${!REQUESTS[@]}"; do
+    echo "Checking response for Request $i..."
+    check_required_string "$OUTPUT_DIR/response_$i.log" "${RESPONSES[$i]}" || exit 1
+    echo "  ✓ '${RESPONSES[$i]}'"
+done
+
+echo "=== Extracting Timestamps ==="
+for i in "${!REQUESTS[@]}"; do
+    RESPONSE_TIMES[$i]=$(tail -n 1 "$OUTPUT_DIR/response_$i.log")
+done
+
+echo "=== Calculating Time Diffs ==="
+for ((i=1; i<${#RESPONSE_TIMES[@]}; i++)); do
+    diff=$((RESPONSE_TIMES[i] - RESPONSE_TIMES[i-1]))
+    exp=${INTERVALS[i]}
+    echo "  Response $((i-1))→$i: ${diff}s (expected: ${exp}s)"
+    if [[ $diff -lt $((exp-1)) || $diff -gt $((exp+1)) ]]; then
+        echo -e "\033[31mTime diff out of range!\033[0m"
+        exit 1
+    fi
+done
+
+echo -e "\033[32mAll tests passed for set $TEST_SET.\033[0m"
+exit 0
